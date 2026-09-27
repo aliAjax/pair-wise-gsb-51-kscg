@@ -33,6 +33,11 @@ python3 app.py --db ./data.db --port 8327
 - `POST /api/records`：创建记录，请求体为`{"reference":"...","data":{...}}`。
 - `POST /api/records/{id}/actions/{action}`：执行业务动作，请求体为`{"expected_version":1,"data":{...}}`。
 
+业务动作依次为`assess`（intake_officer）、`approve`（underwriter）、`activate`（servicer）、`cure`/`default`（servicer）。方案生效（`active`）后支持重议：
+
+- `renegotiate`（servicer）：请求体`data`为`{"monthly_income":...,"monthly_expenses":...,"proposed_payment":...,"reason":"..."}`。系统按新收支重算可承受月供（拟还金额与可支配收入50%取低）和执行月数（欠款/新月供，1–24个月），挂入`pending_renegotiation`；确认前`approved_payment`/`approved_months`仍按原值执行。同一笔贷款已有待确认重议时重复发起返回409。
+- `confirm_renegotiation`（underwriter）：确认后`approved_payment`/`approved_months`更新为重议值并清除待确认项；原方案、新方案和变化原因写入审计时间线。
+
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 
 ## 测试

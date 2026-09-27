@@ -1,4 +1,5 @@
 """住房贷款纾困申请与履约跟踪领域规则与状态转换。"""
+import math
 from typing import Any, Dict, Iterable, Tuple
 
 from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
@@ -6,8 +7,8 @@ from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, 
 
 INITIAL_STATE = "submitted"
 CREATE_ROLES = {'intake_officer'}
-ACTION_ROLES = {'assess': {'intake_officer'}, 'approve': {'underwriter'}, 'activate': {'servicer'}, 'cure': {'servicer'}, 'default': {'servicer'}}
-TRANSITIONS = {'assess': {'submitted': 'assessed'}, 'approve': {'assessed': 'approved'}, 'activate': {'approved': 'active'}, 'cure': {'active': 'cured'}, 'default': {'active': 'defaulted'}}
+ACTION_ROLES = {'assess': {'intake_officer'}, 'approve': {'underwriter'}, 'activate': {'servicer'}, 'cure': {'servicer'}, 'default': {'servicer'}, 'renegotiate': {'servicer'}, 'confirm_renegotiation': {'underwriter'}}
+TRANSITIONS = {'assess': {'submitted': 'assessed'}, 'approve': {'assessed': 'approved'}, 'activate': {'approved': 'active'}, 'cure': {'active': 'cured'}, 'default': {'active': 'defaulted'}, 'renegotiate': {'active': 'active'}, 'confirm_renegotiation': {'active': 'active'}}
 
 
 class DomainRules:
@@ -62,17 +63,41 @@ class DomainRules:
             if item["state"] in {"active", "approved", "assessed"} and item["payload"].get("borrower_id") == payload.get("borrower_id"):
                 raise Conflict("该借款人已有处理中纾困申请")
 
+    def prepare_renegotiation(self, record_payload: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
+        income = number(data, "monthly_income", 1)
+        expenses = number(data, "monthly_expenses", 0)
+        proposed = number(data, "proposed_payment", 0)
+        reason = text(data, "reason")
+        if expenses >= income:
+            raise ValidationError("支出不能达到或超过收入")
+        disposable = income - expenses
+        affordable = round(min(proposed, disposable * 0.5), 2)
+        arrears = float(record_payload.get("arrears") or 0)
+        if affordable > 0 and arrears > 0:
+            months = min(24, max(1, math.ceil(arrears / affordable)))
+        else:
+            months = int(record_payload.get("approved_months") or record_payload.get("eligible_months") or 1)
+        return {
+            "monthly_income": income,
+            "monthly_expenses": expenses,
+            "proposed_payment": proposed,
+            "affordable_payment": affordable,
+            "months": months,
+            "reason": reason,
+        }
+
     def require_transition(self, record: Dict[str, Any], action: str) -> str:
         allowed = TRANSITIONS.get(action, {}).get(record["state"])
         if allowed is None:
             raise Conflict("当前状态不允许执行%s" % action)
         return allowed
 
-    def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, Any], str]:
+    def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, Any], str, Dict[str, Any]]:
         new_state = self.require_transition(record, action)
         data = dict(data or {})
         p = dict(record["payload"])
         changes: Dict[str, Any] = {}
+        audit_extra: Dict[str, Any] = {}
         summary = ""
         if action == "assess":
             changes["assessment_note"] = text(data, "assessment_note")
@@ -100,5 +125,26 @@ class DomainRules:
         elif action == "default":
             changes["default_reason"] = text(data, "default_reason")
             summary = "纾困方案违约"
+        elif action == "renegotiate":
+            if p.get("pending_renegotiation"):
+                raise Conflict("已存在待确认的重议申请")
+            pending = self.prepare_renegotiation(p, data)
+            changes["pending_renegotiation"] = pending
+            audit_extra["current_plan"] = {"approved_payment": p.get("approved_payment"), "approved_months": p.get("approved_months")}
+            audit_extra["renegotiation"] = pending
+            summary = "重议申请已提交"
+        elif action == "confirm_renegotiation":
+            pending = p.get("pending_renegotiation")
+            if not pending:
+                raise Conflict("没有待确认的重议申请")
+            changes["approved_payment"] = float(pending["affordable_payment"])
+            changes["approved_months"] = int(pending["months"])
+            changes["pending_renegotiation"] = None
+            audit_extra["previous_plan"] = {"approved_payment": p.get("approved_payment"), "approved_months": p.get("approved_months")}
+            audit_extra["new_plan"] = {"approved_payment": changes["approved_payment"], "approved_months": changes["approved_months"]}
+            audit_extra["reason"] = pending.get("reason", "")
+            summary = "重议方案确认"
         p.update(changes)
-        return new_state, p, summary or ("已执行%s" % action)
+        if p.get("pending_renegotiation") is None:
+            p.pop("pending_renegotiation", None)
+        return new_state, p, summary or ("已执行%s" % action), audit_extra

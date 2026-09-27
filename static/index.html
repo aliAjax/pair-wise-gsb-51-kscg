@@ -8,26 +8,113 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input { padding: .4rem; width: 8rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin: .5rem 0; }
+    .plan { border: 1px solid #d4dbe3; border-radius: 8px; padding: 1rem; margin: .5rem 0; }
+    .pending { border-color: #d97706; background: #fffbeb; }
+    .muted { color: #64748b; }
   </style>
 </head>
 <body>
 <main>
   <h1>住房贷款纾困申请与履约跟踪</h1>
   <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
+  <div class="row">
+    <label>用户 <input id="user" value="demo-admin"></label>
+    <label>角色 <input id="role" value="admin" title="intake_officer / underwriter / servicer / admin"></label>
+  </div>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+
+  <h2>重议安排</h2>
+  <div class="row">
+    <label>记录ID <input id="recordId" type="number" min="1"></label>
+    <button id="loadRecord">加载详情</button>
+    <button id="loadAudit">审计时间线</button>
+  </div>
+  <div id="plan" class="muted">加载记录后在此显示当前执行方案与待确认重议。</div>
+  <div class="row">
+    <label>新收入 <input id="rnIncome" type="number" min="1" step="0.01"></label>
+    <label>新支出 <input id="rnExpenses" type="number" min="0" step="0.01"></label>
+    <label>拟还金额 <input id="rnProposed" type="number" min="0" step="0.01"></label>
+    <label>变化原因 <input id="rnReason" type="text" style="width:12rem"></label>
+  </div>
+  <div class="row">
+    <button id="rnSubmit">发起重议（履约专员）</button>
+    <button id="rnConfirm">确认重议（审批人）</button>
+  </div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
+let current = null;
+function headers() {
+  return {
+    "X-User-Id": document.getElementById("user").value.trim(),
+    "X-Role": document.getElementById("role").value.trim(),
+    "X-Org": "demo",
+    "Content-Type": "application/json"
+  };
+}
+function print(data) {
+  document.getElementById("output").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+async function request(path, options) {
+  const response = await fetch(path, Object.assign({headers: headers()}, options || {}));
   const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+  if (!response.ok) throw new Error(data.message || ("请求失败:" + response.status));
+  return data;
+}
+async function show(path) {
+  try { print(await request(path)); } catch (err) { print(err.message); }
+}
+function renderPlan(record) {
+  const p = record.payload || {};
+  const box = document.getElementById("plan");
+  let html = "<div class='plan'><b>当前执行方案</b>（状态 " + record.state + "，版本 " + record.version + "）：月供 "
+    + (p.approved_payment ?? "—") + " 元，执行 " + (p.approved_months ?? "—") + " 个月</div>";
+  if (p.pending_renegotiation) {
+    const r = p.pending_renegotiation;
+    html += "<div class='plan pending'><b>待确认重议</b>：新月供 " + r.affordable_payment + " 元，执行 " + r.months
+      + " 个月（拟还 " + r.proposed_payment + " 元；原因：" + r.reason + "）。确认前仍按原值执行。</div>";
+  }
+  box.innerHTML = html;
+}
+async function loadRecord() {
+  const id = document.getElementById("recordId").value;
+  if (!id) { print("请先输入记录ID"); return; }
+  try {
+    current = await request("/api/records/" + id);
+    renderPlan(current);
+    print(current);
+  } catch (err) { print(err.message); }
+}
+async function act(action, data) {
+  if (!current) { print("请先加载记录"); return; }
+  try {
+    const result = await request("/api/records/" + current.id + "/actions/" + action, {
+      method: "POST",
+      body: JSON.stringify({expected_version: current.version, data: data})
+    });
+    current = result;
+    renderPlan(current);
+    print(result);
+  } catch (err) { print(err.message); }
 }
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("loadRecord").onclick = loadRecord;
+document.getElementById("loadAudit").onclick = () => {
+  const id = document.getElementById("recordId").value;
+  if (!id) { print("请先输入记录ID"); return; }
+  show("/api/records/" + id + "/audit");
+};
+document.getElementById("rnSubmit").onclick = () => act("renegotiate", {
+  monthly_income: Number(document.getElementById("rnIncome").value),
+  monthly_expenses: Number(document.getElementById("rnExpenses").value),
+  proposed_payment: Number(document.getElementById("rnProposed").value),
+  reason: document.getElementById("rnReason").value
+});
+document.getElementById("rnConfirm").onclick = () => act("confirm_renegotiation", {});
 </script>
 </body>
 </html>
