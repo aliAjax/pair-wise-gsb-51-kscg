@@ -35,6 +35,14 @@ python3 app.py --db ./data.db --port 8327
 
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 
+## 重议安排
+
+方案生效（`active`）后借款人收入再次变化时，可在不违约的前提下发起重议：
+
+1. 履约专员（`servicer`）调用`renegotiate`，`data`为`{"monthly_income":...,"monthly_expenses":...,"proposed_payment":...,"reason":"..."}`。系统按方案类型重算可承受月供`affordable_payment`和执行月数`months`，写入`pending_renegotiation`；确认前记录仍按原`approved_payment`/`approved_months`执行。
+2. 同一笔贷款只保留一项待确认重议，存在`pending_renegotiation`时重复发起返回`409`。
+3. 审批人（`underwriter`）比较新旧月供与月数后调用`confirm_renegotiation`确认；通过后接口与页面展示新值，原方案值和变化原因保留在审计时间线的`renegotiation`字段中。
+
 ## 测试
 
 ```bash

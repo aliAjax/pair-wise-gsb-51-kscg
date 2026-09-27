@@ -9,7 +9,11 @@
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    label { display: flex; flex-direction: column; font-size: .85rem; gap: .2rem; }
+    input { padding: .4rem; }
+    .panel { border: 1px solid #dde3ea; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+    .pending { background: #fff8e6; border-color: #f0c36d; }
   </style>
 </head>
 <body>
@@ -18,16 +22,101 @@
   <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
+
+  <section class="panel">
+    <h2>重议安排</h2>
+    <div class="row">
+      <label>记录ID <input id="record-id" type="number" min="1" value="1"></label>
+      <button id="load-record">加载详情</button>
+    </div>
+    <pre id="record-view">尚未加载记录。</pre>
+
+    <h3>发起重议（履约专员）</h3>
+    <div class="row">
+      <label>新月收入 <input id="rn-income" type="number" min="1"></label>
+      <label>新月支出 <input id="rn-expenses" type="number" min="0"></label>
+      <label>拟还金额 <input id="rn-offered" type="number" min="0"></label>
+      <label>变化原因 <input id="rn-reason" type="text" placeholder="如：收入再次下降"></label>
+      <button id="rn-submit">发起重议</button>
+    </div>
+
+    <h3>待确认重议（审批人）</h3>
+    <div id="pending-view" class="panel">当前没有待确认的重议。</div>
+    <div class="row" style="margin-top:.5rem"><button id="rn-confirm" disabled>确认重议</button></div>
+  </section>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
+const baseHeaders = {"X-Org":"demo"};
+let current = null;
+
+function headers(role) {
+  return Object.assign({"X-User-Id": "demo-" + role, "X-Role": role, "Content-Type": "application/json"}, baseHeaders);
+}
 async function show(path) {
-  const response = await fetch(path, {headers});
+  const response = await fetch(path, {headers: headers("admin")});
   const data = await response.json();
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
 }
+function renderRecord() {
+  const p = current.payload;
+  const lines = [
+    "状态: " + current.state + " (version " + current.version + ")",
+    "生效月供: " + (p.approved_payment !== undefined ? p.approved_payment : "未批准"),
+    "执行月数: " + (p.approved_months !== undefined ? p.approved_months : "未批准"),
+    "月收入: " + p.monthly_income + " / 月支出: " + p.monthly_expenses
+  ];
+  document.getElementById("record-view").textContent = lines.join("\n");
+  const pending = p.pending_renegotiation;
+  const view = document.getElementById("pending-view");
+  const confirmBtn = document.getElementById("rn-confirm");
+  if (pending) {
+    view.className = "panel pending";
+    view.textContent = "待确认重议：月供 " + p.approved_payment + " → " + pending.affordable_payment
+      + "，执行月数 " + p.approved_months + " → " + pending.months
+      + "，拟还金额 " + pending.proposed_payment + "，原因：" + pending.reason;
+    confirmBtn.disabled = false;
+  } else {
+    view.className = "panel";
+    view.textContent = "当前没有待确认的重议。";
+    confirmBtn.disabled = true;
+  }
+}
+async function loadRecord() {
+  const id = document.getElementById("record-id").value;
+  const response = await fetch("/api/records/" + id, {headers: headers("admin")});
+  const data = await response.json();
+  if (!response.ok) {
+    document.getElementById("record-view").textContent = "加载失败：" + (data.message || response.status);
+    return;
+  }
+  current = data;
+  renderRecord();
+}
+async function act(action, role, data) {
+  if (!current) { alert("请先加载记录"); return; }
+  const response = await fetch("/api/records/" + current.id + "/actions/" + action, {
+    method: "POST",
+    headers: headers(role),
+    body: JSON.stringify({expected_version: current.version, data: data})
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    document.getElementById("record-view").textContent = "操作被拒绝：" + (result.message || response.status);
+    return;
+  }
+  current = result;
+  renderRecord();
+}
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("load-record").onclick = loadRecord;
+document.getElementById("rn-submit").onclick = () => act("renegotiate", "servicer", {
+  monthly_income: Number(document.getElementById("rn-income").value),
+  monthly_expenses: Number(document.getElementById("rn-expenses").value),
+  proposed_payment: Number(document.getElementById("rn-offered").value),
+  reason: document.getElementById("rn-reason").value
+});
+document.getElementById("rn-confirm").onclick = () => act("confirm_renegotiation", "underwriter", {});
 </script>
 </body>
 </html>
